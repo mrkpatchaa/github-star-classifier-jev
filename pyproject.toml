@@ -1,0 +1,20 @@
+[project]
+name = "github-star-classifier-jev"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Médédé Raymond KPATCHAA", email = "kraymond70@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "questionary>=2.1.1",
+    "typesafe-sdk>=0.7.1",
+]
+
+[project.scripts]
+github-star-classifier-jev = "github_star_classifier_jev:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
