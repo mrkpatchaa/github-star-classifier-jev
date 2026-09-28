@@ -84,6 +84,34 @@ uv run python src/main.py --threshold 0.65 --apply
 
 Results below the threshold are reported and left untouched.
 
+## Compare Jev with a frontier model
+
+`--compare PROVIDER:MODEL` asks an LLM the same two questions through TypeSafe's [system-one-adapter](https://github.com/typesafe-ai/system-one-adapter-python) (MIT) and prints its answer under Jev's. Jev still decides; the LLM's answers are only logged, and a summary at the end says how often the two agree.
+
+The adapter is not a project dependency, so pull it in for the run (it is installed from GitHub):
+
+```bash
+ADAPTER='system-one-adapter[openai,anthropic] @ git+https://github.com/typesafe-ai/system-one-adapter-python'
+export OPENAI_API_KEY=...        # or ANTHROPIC_API_KEY for anthropic:<model>
+uv run --with "$ADAPTER" python src/main.py --limit 40 --compare openai:gpt-6-luna
+```
+
+Any OpenAI-compatible endpoint works through the OpenAI SDK's own variables, for example Vercel AI Gateway (one key, several vendors):
+
+```bash
+export OPENAI_BASE_URL=https://ai-gateway.vercel.sh/v1 OPENAI_API_KEY="$AI_GATEWAY_API_KEY"
+uv run --with "$ADAPTER" python src/main.py --limit 40 --compare openai:<vendor>/<model>
+```
+
+Reading the summary:
+
+- `same category`: how often the LLM picks Jev's category.
+- `same category+action`: same category, and both sides above or both below `--threshold`, so they would act the same way.
+- `same drop decision`: both sides on the same side of `--drop-threshold`.
+- `LLM tokens`: the LLM side only; Jev's usage is on your TypeSafe bill.
+
+The adapter runs in probabilities mode on purpose: in its discrete mode every answer reports confidence 1.0, which would make the threshold comparison meaningless. Dry-run is still the default, so a compare run changes nothing on GitHub. The rows marked `DIFFERENT category` are the ones worth labelling by hand: they decide whether Jev or a general model is right for this job.
+
 ## Taxonomy
 
 > **Customize this before you run it.** The included taxonomy was built from one specific star collection (about 800 stars, mostly web frontend, React Native/Expo, PHP/Laravel/WordPress and a recent wave of AI coding agents). It is sized and shaped for that collection, so it probably will not fit yours. Before running on your own stars, look at what you actually star (languages, topics, descriptions), then split the lists that would be too big, merge the ones that would be nearly empty, and add the domains you care about that are missing.

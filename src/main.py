@@ -16,6 +16,7 @@ Safety / idempotency rules:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -575,8 +576,10 @@ def build_state(repo: dict[str, Any]) -> str:
     )
 
 
-def classify_repository(client: TypeSafeClient, repo: dict[str, Any]):
-    response = client.system_one(
+def ask_questions(client: Any, repo: dict[str, Any]):
+    """Ask the category and drop questions. `client` is a TypeSafeClient or, for
+    --compare, a SystemOneAdapterClient: both take the same questions."""
+    return client.system_one(
         state=build_state(repo),
         questions={
             "category": Choice(
@@ -599,7 +602,114 @@ def classify_repository(client: TypeSafeClient, repo: dict[str, Any]):
             ),
         },
     )
+
+
+def classify_repository(client: Any, repo: dict[str, Any]):
+    response = ask_questions(client, repo)
     return response.answers["category"], response.answers["drop"]
+
+
+# ---------------------------------------------------------------------------
+# --compare: the same questions to a frontier LLM, logged next to Jev
+# ---------------------------------------------------------------------------
+
+COMPARE_PROVIDERS = ("openai", "anthropic", "gemini")
+ADAPTER_SOURCE = (
+    "system-one-adapter[openai,anthropic] @ "
+    "git+https://github.com/typesafe-ai/system-one-adapter-python"
+)
+
+
+def open_compare_client(spec: str):
+    """Build the LLM side of --compare with TypeSafe's system-one-adapter (MIT)."""
+    provider, _, model = spec.partition(":")
+    if provider not in COMPARE_PROVIDERS or not model:
+        raise SystemExit(
+            "error: --compare takes PROVIDER:MODEL with PROVIDER one of "
+            f"{', '.join(COMPARE_PROVIDERS)} (e.g. openai:gpt-6-luna)"
+        )
+    try:
+        from system_one_adapter import SystemOneAdapterClient
+    except ImportError:
+        raise SystemExit(
+            "error: --compare needs system-one-adapter. Run with:\n"
+            f'  uv run --with "{ADAPTER_SOURCE}" python src/main.py --compare {spec}'
+        ) from None
+    # Probabilities mode on purpose: in discrete mode the adapter reports confidence
+    # 1.0 for every answer, so the --threshold comparison would mean nothing.
+    return SystemOneAdapterClient(
+        structured_outputs=True,
+        llm_answer_mode="probabilities",
+        normalize_probabilities=True,
+        n_retry_malformed_structure=2,
+        provider=provider,
+        model=model,
+    )
+
+
+def compare_repository(
+    client: Any,
+    repo: dict[str, Any],
+    jev_category: Any,
+    jev_drop_probability: float,
+    args: argparse.Namespace,
+    stats: Counter[str],
+) -> None:
+    """Ask the LLM the same questions and log how it differs from Jev. Never acts."""
+    try:
+        response = ask_questions(client, repo)
+    except Exception as exc:  # the comparison must never break the Jev run
+        print(f"    {args.compare}: ERROR {exc}", file=sys.stderr)
+        stats["compare_errors"] += 1
+        return
+
+    category = response.answers["category"]
+    drop_probability = float(response.answers["drop"].noul)
+    confidence = float(category.confidence)
+    same_category = category.choice == jev_category.choice
+    jev_acts = float(jev_category.confidence) >= args.threshold
+    llm_acts = confidence >= args.threshold
+    same_drop = (drop_probability >= args.drop_threshold) == (
+        jev_drop_probability >= args.drop_threshold
+    )
+
+    stats["compared"] += 1
+    stats["compare_same_category"] += same_category
+    stats["compare_same_action"] += same_category and jev_acts == llm_acts
+    stats["compare_same_drop"] += same_drop
+    stats["compare_tokens_in"] += response.usage.input_tokens_total or 0
+    stats["compare_tokens_out"] += response.usage.output_tokens_total or 0
+    stats["compare_retries"] += response.usage.n_retries_malformed_structure
+
+    name = CATEGORIES.get(category.choice, {}).get("name", category.choice)
+    verdict = "same category" if same_category else "DIFFERENT category"
+    print(
+        f"    {args.compare}: {name} (confidence={confidence:.2f}) "
+        f"drop={drop_probability:.2f}; {verdict}"
+    )
+
+
+def print_compare_summary(stats: Counter[str], spec: str) -> None:
+    compared = stats["compared"]
+    print(f"\nCompare with {spec}")
+    print("-" * (13 + len(spec)))
+    if not compared:
+        print(f"nothing compared (errors: {stats['compare_errors']})")
+        return
+
+    def share(key: str) -> str:
+        return f"{stats[key]}/{compared} ({stats[key] / compared:.0%})"
+
+    print(f"compared:             {compared}")
+    print(f"same category:        {share('compare_same_category')}")
+    print(f"same category+action: {share('compare_same_action')}  (both above or both below --threshold)")
+    print(f"same drop decision:   {share('compare_same_drop')}")
+    print(
+        f"LLM tokens:           {stats['compare_tokens_in']} in / "
+        f"{stats['compare_tokens_out']} out  (Jev's own usage is on your TypeSafe bill)"
+    )
+    print(f"malformed retries:    {stats['compare_retries']}")
+    print(f"errors:               {stats['compare_errors']}")
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +774,15 @@ def parse_args() -> argparse.Namespace:
         "--private-lists",
         action="store_true",
         help="Create missing managed lists as private. Existing list privacy is unchanged.",
+    )
+    parser.add_argument(
+        "--compare",
+        metavar="PROVIDER:MODEL",
+        help=(
+            "Also ask an LLM the same questions through TypeSafe's system-one-adapter "
+            "and print its answers next to Jev's (e.g. openai:gpt-6-luna). Jev still "
+            "decides; the LLM answers are only logged."
+        ),
     )
     return parser.parse_args()
 
@@ -775,6 +894,7 @@ def print_summary(stats: Counter[str], registry: ListRegistry, apply: bool) -> N
 def main() -> int:
     args = parse_args()
     verify_environment()
+    compare_client = open_compare_client(args.compare) if args.compare else None
 
     mode = "APPLY" if args.apply else "DRY-RUN"
     print(f"Mode: {mode}")
@@ -809,7 +929,7 @@ def main() -> int:
     stats["selected"] = len(stars)
     drop_candidates: list[dict[str, Any]] = []
 
-    with TypeSafeClient() as client:
+    with TypeSafeClient() as client, compare_client or contextlib.nullcontext():
         for index, repo in enumerate(stars, start=1):
             repo_id = repo["id"]
             name = repo["nameWithOwner"]
@@ -853,6 +973,8 @@ def main() -> int:
                 f"    Jev: {category['name']} "
                 f"(confidence={confidence:.2f}, probability={probability_for_choice:.2f})"
             )
+            if compare_client is not None:
+                compare_repository(compare_client, repo, answer, drop_probability, args, stats)
 
             if confidence < args.threshold:
                 alternatives = sorted(
@@ -923,6 +1045,8 @@ def main() -> int:
 
     review_drop_candidates(drop_candidates, stats, args.apply)
     print_summary(stats, registry, args.apply)
+    if args.compare:
+        print_compare_summary(stats, args.compare)
     return 1 if stats["errors"] else 0
 
 
