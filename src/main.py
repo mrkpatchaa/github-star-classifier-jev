@@ -929,7 +929,10 @@ def main() -> int:
     stats["selected"] = len(stars)
     drop_candidates: list[dict[str, Any]] = []
 
-    with TypeSafeClient() as client, compare_client or contextlib.nullcontext():
+    # Pinned: jev-latest moves to jev-1.14.0 around 21 Oct 2026, and runs are compared over time.
+    jev_model = os.environ.get("TYPESAFE_DEFAULT_MODEL", "jev-1.13.0")
+    print(f"Jev model: {jev_model}")
+    with TypeSafeClient(model=jev_model) as client, compare_client or contextlib.nullcontext():
         for index, repo in enumerate(stars, start=1):
             repo_id = repo["id"]
             name = repo["nameWithOwner"]

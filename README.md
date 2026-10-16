@@ -7,6 +7,7 @@ Classifies your starred GitHub repositories with TypeSafe Jev and organizes them
 - Python 3.13+
 - GitHub CLI (`gh`) authenticated with GitHub
 - A TypeSafe API key in `TYPESAFE_API_KEY`
+- The Jev model is pinned to `jev-1.13.0`. Set `TYPESAFE_DEFAULT_MODEL` to run another version, for example `jev-1.14.0`.
 - `uv` (recommended) or another Python package manager
 
 ## Setup
